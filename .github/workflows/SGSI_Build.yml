@@ -1,72 +1,229 @@
-name: SGSI_Build
+name: SGSI_Build_IMG_A9-A11
 
 on:
   workflow_dispatch:
+    inputs:
+      ROM_URL:
+        description: 'ROM下载链接'
+        required: true
+        default: 'https://hugeota.d.miui.com/21.5.31/miui_TUCANA_21.5.31_cb42ec9bed_11.0.zip'
+      ZIP_NAME:
+        description: 'ROM文件名'
+        required: true
+        default: 'miui_TUCANA_21.5.31_cb42ec9bed_11.0.zip'
+      ANDROID_VERSION:
+        description: '安卓版本 (Auto/9/10/11)'
+        required: true
+        default: 'Auto'
+      OS_TYPE:
+        description: '系统类型 (miui/coloros等)'
+        required: true
+        default: 'miui'
+      SGSI_TYPE:
+        description: 'SGSI类型 (AB, A, 或 BOTH)'
+        required: true
+        default: 'AB'
+      REPACK_NAME:
+        description: '输出包名称'
+        required: true
+        default: 'SGSI'
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-
+    timeout-minutes: 180
+    env:
+      TOOL_DIR: ${{ github.workspace }}/Tool-SGSI-build
+      BUILD_TIME: ${{ github.run_id }}-${{ github.run_attempt }}
+      
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Load Configuration
-        uses: falti/dotenv-action@v3.0.0
-        id: config
-        with:
-          path: config.env
-
-      - name: Check Configuration
+      - name: 安装基础依赖
         run: |
-          function required () { if ! [[ "$1" ]]; then echo "$2 variable can't be null." && exit 1; fi }
-          required "${{ steps.config.outputs.ROM_URL }}" "ROM_URL"
-          required "${{ steps.config.outputs.BUILD_TYPE }}" "BUILD_TYPE"
-          required "${{ steps.config.outputs.OS_TYPE }}" "OS_TYPE"
-          required "${{ steps.config.outputs.ZIP_NAME }}" "ZIP_NAME"
-          required "${{ steps.config.outputs.VERSION }}" "VERSION"
-          required "${{ steps.config.outputs.REPACK_NAME }}" "REPACK_NAME"
-
-      - name: Cleanup workspace
+          sudo apt-get update -y
+          sudo apt-get install -y git wget zip unzip curl axel p7zip-full openjdk-8-jdk brotli python3 python3-pip android-sdk-libsparse-utils expect device-tree-compiler liblzma-dev liblz4-tool gawk aria2 selinux-utils busybox bc
+          echo "基础依赖安装完成"
+          
+      - name: 清理环境
         run: |
+          sudo rm -rf /usr/share/dotnet /etc/mysql /etc/php /etc/apt/sources.list.d
+          sudo apt-get autoremove -y
+          sudo apt-get clean
           df -h
-          echo "跳过危险的系统清理操作"
-
-      - name: Initializing Environment
+          
+      - name: 设置环境
         run: |
-          sudo apt-get update
-          sudo apt-get install -y git wget zip unzip curl axel
-
-      - name: Cloning SGSI source code
+          git clone --depth=1 https://github.com/xiaoxindada/SGSI-build-tool.git "$TOOL_DIR"
+          cd "$TOOL_DIR"
+          git clone https://github.com/xpirt/sdat2img
+          git clone https://github.com/xiaoxindada/img2sdat
+          mkdir -p tmp
+          echo "环境设置完成"
+          
+      - name: 替换自定义内容
         run: |
-          git clone --recurse-submodules https://github.com/xiaoxindada/SGSI-build-tool.git -b 12 $GITHUB_WORKSPACE/SGSI-build-tool
-
-      - name: Setup sGSI tools requirements
+          if [ -d "./apps_clean" ]; then
+            sudo rm -rf "$TOOL_DIR/apps_clean"
+            sudo cp -r ./apps_clean "$TOOL_DIR/apps_clean"
+            sudo chmod 777 -R "$TOOL_DIR"
+            echo "自定义内容替换完成"
+          else
+            echo "跳过自定义内容替换"
+          fi
+          
+      - name: 下载ROM
         run: |
-          sudo sed -i 's/USE_MIRROR_FOR_PIP=true/USE_MIRROR_FOR_PIP=false/' $GITHUB_WORKSPACE/SGSI-build-tool/setup.sh
-          sudo bash $GITHUB_WORKSPACE/SGSI-build-tool/setup.sh
+          cd "$TOOL_DIR"
+          axel -n 8 -o "tmp/${{ inputs.ZIP_NAME }}" "${{ inputs.ROM_URL }}" || curl -L -o "tmp/${{ inputs.ZIP_NAME }}" "${{ inputs.ROM_URL }}"
+          echo "ROM下载完成"
+          
+      - name: 检测安卓版本
+        run: |
+          cd "$TOOL_DIR/tmp"
+          FILENAME="${{ inputs.ZIP_NAME }}"
+          ANDROID_VERSION="${{ inputs.ANDROID_VERSION }}"
+          
+          if [ "$ANDROID_VERSION" = "Auto" ]; then
+            echo "自动检测安卓版本..."
+            ANDROID_VERSION=11
+            if [[ "$FILENAME" =~ _(9|9\.0|9\.1|Pie|PIE|pie) ]]; then ANDROID_VERSION=9; fi
+            if [[ "$FILENAME" =~ _(10|10\.0|10\.1|Q|q) ]]; then ANDROID_VERSION=10; fi
+            echo "检测到安卓版本: $ANDROID_VERSION"
+          else
+            echo "使用指定安卓版本: $ANDROID_VERSION"
+          fi
+          
+          echo "ANDROID_VERSION=$ANDROID_VERSION" >> $GITHUB_ENV
+          
+      - name: 修复Python环境
+        run: |
+          # 安装Python2和相关依赖
+          sudo apt-get install -y python-is-python3 python2 python2-dev
+          curl https://bootstrap.pypa.io/pip/2.7/get-pip.py -o get-pip.py
+          sudo python2 get-pip.py
+          
+          # 安装必要的Python模块
+          sudo pip2 install backports.lzma pycryptodome pycrypto
+          sudo pip3 install backports.lzma pycryptodome pycrypto
+          
+          echo "Python环境修复完成"
+          
+      - name: 配置工具环境 (setup.sh)
+        run: |
+          cd "$TOOL_DIR"
+          
+          # 修复setup.sh参数
+          sed -i 's/USE_MIRROR_FOR_PIP=true/USE_MIRROR_FOR_PIP=false/' setup.sh
+          sed -i 's/sudo apt/sudo apt-get/' setup.sh
+          
+          # 确保setup.sh可执行
+          chmod +x setup.sh
+          
+          # 执行setup.sh
+          echo "运行setup.sh..."
+          sudo ./setup.sh
+          
+          # 验证安装
+          echo "Python版本:"
+          python --version
+          python2 --version
+          python3 --version
+          echo "Pip版本:"
+          pip --version
+          pip2 --version
+          pip3 --version
+          echo "Java版本:"
           java -version
-
-      - name: Build SGSI
-        run: |
-          cd $GITHUB_WORKSPACE/SGSI-build-tool
-          sudo bash ./url2SGSI.sh "${{ steps.config.outputs.ROM_URL }}" "${{ steps.config.outputs.OS_TYPE }}" "${{ steps.config.outputs.BUILD_TYPE }}"
-
-      - name: Repack Output File
-        run: |
-          cd $GITHUB_WORKSPACE/SGSI-build-tool
-          mkdir -p upload
+          echo "环境配置完成"
           
-          # 使用zip分卷功能
-          zip -s 1024m "upload/${{ steps.config.outputs.REPACK_NAME }}.zip" SGSI/*
+      - name: 构建AB类型GSI
+        if: ${{ inputs.SGSI_TYPE == 'AB' || inputs.SGSI_TYPE == 'BOTH' }}
+        run: |
+          cd "$TOOL_DIR"
+          echo "构建AB类型GSI..."
+          sudo rm -rf SGSI system.img vendor.img product.img system_ext.img odm.img
           
-          ls -lh upload/
-
-      - name: Upload SGSI to GH-Release
-        uses: ncipollo/release-action@v1.8.6
+          # 使用expect自动输入zip文件名
+          expect <<EOF
+          spawn sudo bash make.sh AB
+          expect "请输入需要解压的zip:"
+          send "${{ inputs.ZIP_NAME }}\r"
+          expect eof
+          EOF
+          
+          # 检查构建是否成功
+          if [ -f "SGSI/system.img" ]; then
+            mkdir -p output
+            mv SGSI/system.img output/system_ab.img
+            echo "AB类型构建完成"
+          else
+            echo "AB类型构建失败!"
+            exit 1
+          fi
+          
+      - name: 构建A类型GSI
+        if: ${{ inputs.SGSI_TYPE == 'A' || inputs.SGSI_TYPE == 'BOTH' }}
+        run: |
+          cd "$TOOL_DIR"
+          echo "构建A类型GSI..."
+          sudo rm -rf SGSI system.img vendor.img product.img system_ext.img odm.img
+          
+          # 使用expect自动输入zip文件名
+          expect <<EOF
+          spawn sudo bash make.sh A
+          expect "请输入需要解压的zip:"
+          send "${{ inputs.ZIP_NAME }}\r"
+          expect eof
+          EOF
+          
+          # 检查构建是否成功
+          if [ -f "SGSI/system.img" ]; then
+            mkdir -p output
+            mv SGSI/system.img output/system_a.img
+            echo "A类型构建完成"
+          else
+            echo "A类型构建失败!"
+            exit 1
+          fi
+          
+      - name: 打包AB类型
+        if: ${{ inputs.SGSI_TYPE == 'AB' || inputs.SGSI_TYPE == 'BOTH' }}
+        run: |
+          cd "$TOOL_DIR/output"
+          mkdir -p packages
+          mkdir AB_package
+          cp system_ab.img AB_package/system.img
+          echo "类型: AB" > AB_package/build-info.txt
+          echo "系统: ${{ inputs.OS_TYPE }}" >> AB_package/build-info.txt
+          echo "安卓版本: ${{ env.ANDROID_VERSION }}" >> AB_package/build-info.txt
+          echo "源ROM: ${{ inputs.ZIP_NAME }}" >> AB_package/build-info.txt
+          echo "构建时间: $(date)" >> AB_package/build-info.txt
+          (cd AB_package && zip -r "../packages/AB_${{ inputs.REPACK_NAME }}.zip" .)
+          echo "AB类型打包完成"
+          
+      - name: 打包A类型
+        if: ${{ inputs.SGSI_TYPE == 'A' || inputs.SGSI_TYPE == 'BOTH' }}
+        run: |
+          cd "$TOOL_DIR/output"
+          mkdir -p packages
+          mkdir A_package
+          cp system_a.img A_package/system.img
+          echo "类型: A" > A_package/build-info.txt
+          echo "系统: ${{ inputs.OS_TYPE }}" >> A_package/build-info.txt
+          echo "安卓版本: ${{ env.ANDROID_VERSION }}" >> A_package/build-info.txt
+          echo "源ROM: ${{ inputs.ZIP_NAME }}" >> A_package/build-info.txt
+          echo "构建时间: $(date)" >> A_package/build-info.txt
+          (cd A_package && zip -r "../packages/A_${{ inputs.REPACK_NAME }}.zip" .)
+          echo "A类型打包完成"
+          
+      - name: 发布镜像
+        uses: softprops/action-gh-release@v1
         with:
-          artifacts: ${{ github.workspace }}/SGSI-build-tool/upload/*
-          name: "${{ steps.config.outputs.OS_TYPE }}${{ steps.config.outputs.BUILD_TYPE }}-Android${{ steps.config.outputs.VERSION }}-unpack"
-          tag: "${{ steps.config.outputs.OS_TYPE }}${{ steps.config.outputs.BUILD_TYPE }}-${{ steps.config.outputs.VERSION }}-${{ github.run_number }}"
-          bodyFile: "${{ github.workspace }}/SGSI-build-tool/SGSI/build_info.txt"
-          token: ${{ secrets.GITHUB_TOKEN }}
+          files: ${{ env.TOOL_DIR }}/output/packages/*.zip
+          tag_name: "sgs-img-${{ env.BUILD_TIME }}"
+          body: |
+            系统类型: ${{ inputs.OS_TYPE }}
+            安卓版本: ${{ env.ANDROID_VERSION }}
+            构建类型: ${{ inputs.SGSI_TYPE }}
+            源ROM: ${{ inputs.ZIP_NAME }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
